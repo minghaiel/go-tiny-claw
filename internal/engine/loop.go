@@ -1,3 +1,4 @@
+// Package engine runs the agent's tool-enabled interaction loop.
 package engine
 
 import (

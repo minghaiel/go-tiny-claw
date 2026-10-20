@@ -1,3 +1,4 @@
+// Package tools defines interfaces for registering and executing tools.
 package tools
 
 import (

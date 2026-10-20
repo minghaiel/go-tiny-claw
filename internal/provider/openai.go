@@ -1,4 +1,4 @@
-// internal/provider/openai.go
+// Package provider implements model providers used by the application.
 package provider
 
 import (
