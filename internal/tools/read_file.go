@@ -1,4 +1,3 @@
-// internal/tools/read_file.go
 package tools
 
 import (
