@@ -1,3 +1,5 @@
+// Package engine 实现 go-tiny-claw 的核心执行引擎：驱动 LLM 完成思考与行动阶段，
+// 并以受限的并发度执行模型请求的工具调用。
 package engine
 
 import (
@@ -35,7 +37,7 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 }
 
 // Run 启动 Agent 的生命周期
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
+func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {    
 	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
 	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
 
@@ -63,7 +65,9 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		// Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
 		// ====================================================================
 		if e.EnableThinking {
-			log.Println("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
+			if reporter != nil {
+                reporter.OnThinking(ctx)
+            }
 
 			// 核心机制：传入的 availableTools 为 nil！
 			// 大模型看不到任何 JSON Schema，被迫只能输出纯文本的思考过程。
@@ -74,7 +78,6 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 
 			// 如果模型输出了思考过程，我们将其作为 Assistant 消息追加到上下文中
 			if thinkResp.Content != "" {
-				fmt.Printf("🧠 [内部思考 Trace]: %s\n", thinkResp.Content)
 				contextHistory = append(contextHistory, *thinkResp)
 			}
 		}
@@ -82,10 +85,6 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		// ====================================================================
 		// Phase 2: 行动阶段 (Action) - 恢复工具，顺着规划执行
 		// ====================================================================
-		log.Println("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...")
-
-		// 此时的 contextHistory 中已经包含了上一阶段模型自己的 Thinking Trace。
-		// 模型会顺着自己的逻辑，结合恢复的 availableTools 发起精准的工具调用。
 		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
@@ -93,19 +92,16 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 
 		contextHistory = append(contextHistory, *actionResp)
 
-		if actionResp.Content != "" {
-			fmt.Printf("🤖 [对外回复]: %s\n", actionResp.Content)
+		if actionResp.Content != "" && reporter != nil {
+			reporter.OnMessage(ctx, actionResp.Content)
 		}
 
 		// ====================================================================
 		// 退出与执行逻辑
 		// ====================================================================
 		if len(actionResp.ToolCalls) == 0 {
-			log.Println("[Engine] 模型未请求调用工具，任务宣告完成。")
 			break
 		}
-
-		log.Printf("[Engine] 模型请求并发调用 %d 个工具...\n", len(actionResp.ToolCalls))
 
 		// 1. 预分配一个固定长度的切片，用于安全地存放各个并发工具的执行结果（Observation）
 		// 长度与 ToolCalls 的数量完全一致
@@ -127,36 +123,37 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 				defer wg.Done()          // 协程结束时计数器减一
 				defer func() { <-sem }() // 释放令牌
 
-				log.Printf("  -> [Go-%d] 🛠️ 触发并行执行: %s\n", idx, call.Name)
+                if reporter != nil { 
+                    // 【触发 Reporter】: 报告即将在底层执行的工具 
+                    reporter.OnToolCall(ctx, call.Name, string(call.Arguments)) 
+                }
 
 				// 调用底层 Registry 执行工具（物理操作）
 				result := e.registry.Execute(ctx, call)
 
-				if result.IsError {
-					log.Printf("  -> [Go-%d] ❌ 工具执行报错: %s\n", idx, result.Output)
-				} else {
-					log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)\n", idx, len(result.Output))
-				}
+                if reporter != nil {
+                    // 为了防止大文件读取导致飞书消息过长被截断，我们仅汇报工具执行状态
+                    // 注意：传递给大模型的 observationMsgs 依然是完整数据，只是人类看到的 Reporter 是缩略版
+                    displayOutput := result.Output
+                    if len(displayOutput) > 200 {
+                        displayOutput = displayOutput[:200] + "... (已截断)"
+                    }
+                    // 【触发 Reporter】: 汇报工具物理执行的结果
+                    reporter.OnToolResult(ctx, call.Name, displayOutput, result.IsError)
+                }
 
-				// 将执行结果封装为一条用户消息 (RoleUser)
-				obsMsg := schema.Message{
+				observationMsgs[idx] = schema.Message{
 					Role:       schema.RoleUser,
 					Content:    result.Output,
 					ToolCallID: call.ID,
 				}
 
-				// 【线程安全】: 由于每个 Goroutine 操作的是预分配切片的不同索引，
-				// 这里不需要加锁 (Mutex)，性能极高！
-				observationMsgs[idx] = obsMsg
-
-			}(i, toolCall) // 闭包传参
+			}(i, toolCall)
 		}
 
 		// 4. Join 阻塞等待：主循环挂起，直到所有的并发协程全部执行完毕
 		wg.Wait()
-		// 所有协程已退出、令牌全部归还，关闭信号量通道，明确结束本轮令牌的生命周期
 		close(sem)
-		log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
 
 		// 5. 聚合装填：将并行的结果，按照原本的顺序，一次性追加到上下文时间线中
 		contextHistory = append(contextHistory, observationMsgs...)
