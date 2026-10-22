@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/minghaiel/go-tiny-claw/internal/provider"
 	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
@@ -101,27 +102,54 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
             break
         }
 
-        log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(actionResp.ToolCalls))
+        log.Printf("[Engine] 模型请求并发调用 %d 个工具...\n", len(actionResp.ToolCalls))
 
-        for _, toolCall := range actionResp.ToolCalls {
-            log.Printf("  -> 🛠️ 执行工具: %s, 参数: %s\n", toolCall.Name, string(toolCall.Arguments))
+        // 1. 预分配一个固定长度的切片，用于安全地存放各个并发工具的执行结果（Observation）
+        // 长度与 ToolCalls 的数量完全一致
+        observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
 
-            result := e.registry.Execute(ctx, toolCall)
+        // 2. 声明 WaitGroup 用于阻塞等待所有协程完成
+        var wg sync.WaitGroup
 
-            if result.IsError {
-                log.Printf("  -> ❌ 工具执行报错: %s\n", result.Output)
-            } else {
-                log.Printf("  -> ✅ 工具执行成功 (返回 %d 字节)\n", len(result.Output))
-            }
+        // 3. 遍历模型请求的所有工具，为每一个工具单独 Fork 出一个 Goroutine
+        for i, toolCall := range actionResp.ToolCalls {
+            wg.Add(1) // 增加计数器
 
-            // 将工具执行的观察结果追加到 Context，准备进入下一轮
-            observationMsg := schema.Message{
-                Role:       schema.RoleUser,
-                Content:    result.Output,
-                ToolCallID: toolCall.ID,
-            }
-            contextHistory = append(contextHistory, observationMsg)
+            // 开启协程。注意：一定要将索引 i 和 toolCall 作为参数传入匿名函数，防止闭包变量捕获陷阱！
+            go func(idx int, call schema.ToolCall) {
+                defer wg.Done() // 协程结束时计数器减一
+
+                log.Printf("  -> [Go-%d] 🛠️ 触发并行执行: %s\n", idx, call.Name)
+
+                // 调用底层 Registry 执行工具（物理操作）
+                result := e.registry.Execute(ctx, call)
+
+                if result.IsError {
+                    log.Printf("  -> [Go-%d] ❌ 工具执行报错: %s\n", idx, result.Output)
+                } else {
+                    log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)\n", idx, len(result.Output))
+                }
+
+                // 将执行结果封装为一条用户消息 (RoleUser)
+                obsMsg := schema.Message{
+                    Role:       schema.RoleUser,
+                    Content:    result.Output,
+                    ToolCallID: call.ID,
+                }
+
+                // 【线程安全】: 由于每个 Goroutine 操作的是预分配切片的不同索引，
+                // 这里不需要加锁 (Mutex)，性能极高！
+                observationMsgs[idx] = obsMsg
+
+            }(i, toolCall) // 闭包传参
         }
+
+        // 4. Join 阻塞等待：主循环挂起，直到所有的并发协程全部执行完毕
+        wg.Wait()
+        log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
+
+        // 5. 聚合装填：将并行的结果，按照原本的顺序，一次性追加到上下文时间线中
+        contextHistory = append(contextHistory, observationMsgs...)
     }
 
     return nil
