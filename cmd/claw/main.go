@@ -44,7 +44,7 @@ func main() {
     //     return
     // }
     // `
-    prompt := `修复server.go文件，server.go 中有main方法，修复后让main方法能正常跑起来`
+    prompt := `读取cmd/claw/main.go文件，并分析main.go的逻辑`
 
 
     err := eng.Run(context.Background(), prompt)

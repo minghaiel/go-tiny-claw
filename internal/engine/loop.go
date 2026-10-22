@@ -154,6 +154,8 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 
 		// 4. Join 阻塞等待：主循环挂起，直到所有的并发协程全部执行完毕
 		wg.Wait()
+		// 所有协程已退出、令牌全部归还，关闭信号量通道，明确结束本轮令牌的生命周期
+		close(sem)
 		log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
 
 		// 5. 聚合装填：将并行的结果，按照原本的顺序，一次性追加到上下文时间线中
