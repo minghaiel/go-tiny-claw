@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log"
 
-	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
+	"github.com/minghaiel/go-tiny-claw/internal/schema"
 )
 
 // Registry 定义了工具的注册与分发执行接口

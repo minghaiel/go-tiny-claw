@@ -8,7 +8,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
-	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
+	"github.com/minghaiel/go-tiny-claw/internal/schema"
 )
 
 type ClaudeProvider struct {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
+	"github.com/minghaiel/go-tiny-claw/internal/schema"
 )
 
 // Compactor 负责监控和压缩上下文内存，防止大模型发生 OOM

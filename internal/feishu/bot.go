@@ -13,7 +13,9 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
+	ctxpkg "github.com/minghaiel/go-tiny-claw/internal/context"
 	"github.com/minghaiel/go-tiny-claw/internal/engine"
+	"github.com/minghaiel/go-tiny-claw/internal/schema"
 )
 
 // FeishuBot 封装了飞书机器人的配置与核心业务流
@@ -82,8 +84,13 @@ func (b *FeishuBot) handleAgentRun(chatId string, prompt string) {
 		chatId: chatId,
 	}
 
+	// 每个飞书会话对应一个独立的 Session（按 chatId 隔离工作记忆）
+	workDir, _ := os.Getwd()
+	sess := ctxpkg.GlobalSessionMgr.GetOrCreate(chatId, workDir)
+	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+
 	// 启动引擎！
-	err := b.engine.Run(context.Background(), prompt, reporter)
+	err := b.engine.Run(context.Background(), sess, reporter)
 	if err != nil {
 		reporter.sendMsg(fmt.Sprintf("❌ Agent 运行崩溃: %v", err))
 	}

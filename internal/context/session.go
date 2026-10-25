@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
+	"github.com/minghaiel/go-tiny-claw/internal/schema"
 )
 
 // Session 代表了一次持续的人机交互过程。它负责维护该会话的完整历史。

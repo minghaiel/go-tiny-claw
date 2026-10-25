@@ -10,7 +10,7 @@ import (
 
 	ctxpkg "github.com/minghaiel/go-tiny-claw/internal/context"
 	"github.com/minghaiel/go-tiny-claw/internal/provider"
-	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
+	"github.com/minghaiel/go-tiny-claw/internal/schema"
 	"github.com/minghaiel/go-tiny-claw/internal/tools"
 )
 
@@ -22,15 +22,17 @@ type AgentEngine struct {
 	provider       provider.LLMProvider
 	registry       tools.Registry
 	EnableThinking bool // 慢思考模式开关
+	PlanMode       bool // 暴露给外部的计划模式开关
 
 	compactor *ctxpkg.Compactor // 压缩器实例
 }
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool) *AgentEngine {
+func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool, planMode bool) *AgentEngine {
 	return &AgentEngine{
 		provider:       p,
 		registry:       r,
 		EnableThinking: enableThinking,
+		PlanMode:       planMode,
 		// 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
 		// 并保护最近的 6 条消息（大约两轮 Turn 的交互）
 		compactor: ctxpkg.NewCompactor(3000, 6),
@@ -42,7 +44,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
 
 	// 动态组装 System Prompt
-	composer := ctxpkg.NewPromptComposer(session.WorkDir)
+	composer := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode)
 	systemMsg := composer.Build()
 
 	for {

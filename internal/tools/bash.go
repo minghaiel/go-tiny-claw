@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"time"
 
-	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
+	"github.com/minghaiel/go-tiny-claw/internal/schema"
 )
 
 type BashTool struct {

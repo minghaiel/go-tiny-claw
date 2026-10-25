@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
+	"github.com/minghaiel/go-tiny-claw/internal/schema"
 )
 
 // ReadFileTool 实现了读取本地文件内容的工具

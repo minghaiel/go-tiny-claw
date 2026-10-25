@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
+	"github.com/minghaiel/go-tiny-claw/internal/schema"
 )
 
 type WriteFileTool struct {
