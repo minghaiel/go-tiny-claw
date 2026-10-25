@@ -19,53 +19,49 @@ const maxToolConcurrency = 20
 
 // AgentEngine 是微型 OS 的核心驱动
 type AgentEngine struct {
-	provider provider.LLMProvider
-	registry tools.Registry
+	provider       provider.LLMProvider
+	registry       tools.Registry
+	EnableThinking bool // 慢思考模式开关
 
-	// WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
-	WorkDir string
-
-	EnableThinking bool                   // 慢思考模式开关
-	composer       *ctxpkg.PromptComposer // 引擎持有 Composer 实例
+	compactor *ctxpkg.Compactor // 压缩器实例
 }
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
+func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool) *AgentEngine {
 	return &AgentEngine{
 		provider:       p,
 		registry:       r,
-		WorkDir:        workDir,
 		EnableThinking: enableThinking,
-		composer:       ctxpkg.NewPromptComposer(workDir),
+		// 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
+		// 并保护最近的 6 条消息（大约两轮 Turn 的交互）
+		compactor: ctxpkg.NewCompactor(3000, 6),
 	}
 }
 
 // Run 启动 Agent 的生命周期
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
-	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
-	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
+func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter Reporter) error {
+	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
 
 	// 动态组装 System Prompt
-	systemMsg := e.composer.Build()
-
-	contextHistory := []schema.Message{
-		systemMsg,
-		{
-			Role:    schema.RoleUser,
-			Content: userPrompt,
-		},
-	}
-
-	turnCount := 0
+	composer := ctxpkg.NewPromptComposer(session.WorkDir)
+	systemMsg := composer.Build()
 
 	for {
-		turnCount++
-		log.Printf("\n========== [Turn %d] 开始 ==========\n", turnCount)
-
 		// 获取当前挂载的所有工具定义
 		availableTools := e.registry.GetAvailableTools()
 
+		// 1. 从 Session 提取出近期的 Working Memory
+		workingMemory := session.GetWorkingMemory(20)
+
+		var contextHistory []schema.Message
+		contextHistory = append(contextHistory, systemMsg)
+		contextHistory = append(contextHistory, workingMemory...)
+
+		// 在向 Provider 发起推理前，过一遍内存压缩器！
+		// 无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
+		compactedContext := e.compactor.Compact(contextHistory)
+
 		// ====================================================================
-		// Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
+		// Phase 2: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
 		// ====================================================================
 		if e.EnableThinking {
 			if reporter != nil {
@@ -74,53 +70,46 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 
 			// 核心机制：传入的 availableTools 为 nil！
 			// 大模型看不到任何 JSON Schema，被迫只能输出纯文本的思考过程。
-			thinkResp, err := e.provider.Generate(ctx, contextHistory, nil)
+			thinkResp, err := e.provider.Generate(ctx, compactedContext, nil)
 			if err != nil {
-				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
+				return fmt.Errorf("Thinking 阶段生成失败: %w\n", err)
 			}
 
 			// 如果模型输出了思考过程，我们将其作为 Assistant 消息追加到上下文中
 			if thinkResp.Content != "" {
-				contextHistory = append(contextHistory, *thinkResp)
+				// 将思考持久化到 Session 中
+				session.Append(*thinkResp)
+				compactedContext = append(compactedContext, *thinkResp)
 			}
 		}
 
 		// ====================================================================
-		// Phase 2: 行动阶段 (Action) - 恢复工具，顺着规划执行
+		// Phase 3: 行动阶段 (Action) - 恢复工具，顺着规划执行
 		// ====================================================================
-		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
+		actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
 		if err != nil {
-			return fmt.Errorf("Action 阶段生成失败: %w", err)
+			return fmt.Errorf("Action 阶段生成失败: %w\n", err)
 		}
 
-		if err != nil {
-			return err
-		}
-
-		contextHistory = append(contextHistory, *actionResp)
+		// 将大模型的行动响应持久化到 Session 中
+		session.Append(*actionResp)
+		compactedContext = append(compactedContext, *actionResp)
 
 		if actionResp.Content != "" && reporter != nil {
 			reporter.OnMessage(ctx, actionResp.Content)
 		}
 
-		// ====================================================================
-		// 退出与执行逻辑
-		// ====================================================================
 		if len(actionResp.ToolCalls) == 0 {
+			// 如果没有工具调用，说明本次任务已完成，打破 ReAct 循环，挂起等待下一条指令
 			break
 		}
 
-		// 1. 预分配一个固定长度的切片，用于安全地存放各个并发工具的执行结果（Observation）
-		// 长度与 ToolCalls 的数量完全一致
+		// ====================================================================
+		// Phase 4: 并发执行底层工具
+		// ====================================================================
 		observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
-
-		// 2. 声明 WaitGroup 用于阻塞等待所有协程完成
 		var wg sync.WaitGroup
-
-		// 2.1 信号量：通过带缓冲的 chan 限制最大并行度为 maxToolConcurrency
 		sem := make(chan struct{}, maxToolConcurrency)
-
-		// 3. 遍历模型请求的所有工具，为每一个工具单独 Fork 出一个 Goroutine
 		for i, toolCall := range actionResp.ToolCalls {
 			sem <- struct{}{} // 获取令牌；在途协程达到上限时此处阻塞
 			wg.Add(1)         // 增加计数器
@@ -131,21 +120,16 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 				defer func() { <-sem }() // 释放令牌
 
 				if reporter != nil {
-					// 【触发 Reporter】: 报告即将在底层执行的工具
 					reporter.OnToolCall(ctx, call.Name, string(call.Arguments))
 				}
 
-				// 调用底层 Registry 执行工具（物理操作）
 				result := e.registry.Execute(ctx, call)
 
 				if reporter != nil {
-					// 为了防止大文件读取导致飞书消息过长被截断，我们仅汇报工具执行状态
-					// 注意：传递给大模型的 observationMsgs 依然是完整数据，只是人类看到的 Reporter 是缩略版
 					displayOutput := result.Output
 					if len(displayOutput) > 200 {
 						displayOutput = displayOutput[:200] + "... (已截断)"
 					}
-					// 【触发 Reporter】: 汇报工具物理执行的结果
 					reporter.OnToolResult(ctx, call.Name, displayOutput, result.IsError)
 				}
 
@@ -158,12 +142,11 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 			}(i, toolCall)
 		}
 
-		// 4. Join 阻塞等待：主循环挂起，直到所有的并发协程全部执行完毕
 		wg.Wait()
 		close(sem)
 
-		// 5. 聚合装填：将并行的结果，按照原本的顺序，一次性追加到上下文时间线中
-		contextHistory = append(contextHistory, observationMsgs...)
+		// 将所有的工具执行结果（Observation）持久化到 Session 中，开启下一轮的复盘与推理
+		session.Append(observationMsgs...)
 	}
 
 	return nil
