@@ -8,6 +8,9 @@ import (
 	"log"
 	"sync"
 
+	"github.com/bytedance/sonic"
+
+	ctxpkg "github.com/minghaiel/go-tiny-claw/internal/context"
 	"github.com/minghaiel/go-tiny-claw/internal/provider"
 	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
 	"github.com/minghaiel/go-tiny-claw/internal/tools"
@@ -24,7 +27,8 @@ type AgentEngine struct {
 	// WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
 	WorkDir string
 
-	EnableThinking bool // 【新增】慢思考模式开关
+	EnableThinking bool                   // 慢思考模式开关
+	composer       *ctxpkg.PromptComposer // 引擎持有 Composer 实例
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
@@ -33,6 +37,7 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		registry:       r,
 		WorkDir:        workDir,
 		EnableThinking: enableThinking,
+		composer:       ctxpkg.NewPromptComposer(workDir),
 	}
 }
 
@@ -41,11 +46,11 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
 	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
 
+	// 动态组装 System Prompt
+	systemMsg := e.composer.Build()
+
 	contextHistory := []schema.Message{
-		{
-			Role:    schema.RoleSystem,
-			Content: "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
-		},
+		systemMsg,
 		{
 			Role:    schema.RoleUser,
 			Content: userPrompt,
@@ -90,7 +95,11 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
 
-		log.Printf("模型输出：%+v\n", actionResp)
+		actionRespStr, err := sonic.MarshalString(actionResp)
+		if err != nil {
+			return err
+		}
+		log.Printf("模型输出：%s\n", actionRespStr)
 
 		contextHistory = append(contextHistory, *actionResp)
 
@@ -102,6 +111,12 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 		// 退出与执行逻辑
 		// ====================================================================
 		if len(actionResp.ToolCalls) == 0 {
+			contextJSON, err := sonic.Marshal(contextHistory)
+			if err != nil {
+				log.Printf("序列化 contextHistory 失败: %v", err)
+			} else {
+				log.Printf("context: %s", contextJSON)
+			}
 			break
 		}
 
