@@ -8,8 +8,6 @@ import (
 	"log"
 	"sync"
 
-	"github.com/bytedance/sonic"
-
 	ctxpkg "github.com/minghaiel/go-tiny-claw/internal/context"
 	"github.com/minghaiel/go-tiny-claw/internal/provider"
 	schema "github.com/minghaiel/go-tiny-claw/internal/scheme"
@@ -95,11 +93,9 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
 
-		actionRespStr, err := sonic.MarshalString(actionResp)
 		if err != nil {
 			return err
 		}
-		log.Printf("模型输出：%s\n", actionRespStr)
 
 		contextHistory = append(contextHistory, *actionResp)
 
@@ -111,12 +107,6 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 		// 退出与执行逻辑
 		// ====================================================================
 		if len(actionResp.ToolCalls) == 0 {
-			contextJSON, err := sonic.Marshal(contextHistory)
-			if err != nil {
-				log.Printf("序列化 contextHistory 失败: %v", err)
-			} else {
-				log.Printf("context: %s", contextJSON)
-			}
 			break
 		}
 
