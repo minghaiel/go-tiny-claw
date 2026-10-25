@@ -21,7 +21,15 @@ func NewCompactor(maxChars int, retainLastMsgs int) *Compactor {
 }
 
 // Compact 接收准备发送给大模型的消息数组。
-// 如果总长度超标，对远期历史区进行全量掩码 (Masking)，对短期保护区进行超长局部截断 (Truncation)。
+// 如果总长度超标
+// - 对远期历史执行全量掩码（Masking）
+// - 对短期记忆超长文本执行掐头去尾局部截断（Head-Tail Truncation）
+/*
+TODO: 按业界最佳实践优化：大模型摘要压缩（LLM-based Summarization）
+	Compactor 升级为“调用 LLM做摘要（Summarization）”后，Compact的调用不能放在 Main Loop 中每次请求大模型前常见做法是：
+	维护一个内存 Working Context，当它达到阈值时，在后台异步触发一个小模型（如 Flash）进行摘要，并将摘要存入持久化的
+	Long-term Database 中/或session文件中。主循环请求时只带上短期的 Working Context 和固定的几条全局设定。
+*/
 func (c *Compactor) Compact(msgs []schema.Message) []schema.Message {
 	currentLength := c.estimateLength(msgs)
 
